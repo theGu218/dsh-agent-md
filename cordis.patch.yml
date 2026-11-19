@@ -1,0 +1,4 @@
+- insert:
+    - id: agent-md
+      name: dsh-agent-md
+      config: {}

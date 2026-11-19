@@ -1,0 +1,55 @@
+{
+  "name": "dsh-agent-md",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "项目级 agent.md 记忆插件：把对话里重要的事实、约束和任务写进工作目录下的 agent.md，每次请求自动注入；任务完成后降权或删除条目，让长任务不再失忆。",
+  "license": "MIT",
+  "author": "theGu218",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theGu218/dsh-agent-md.git"
+  },
+  "homepage": "https://github.com/theGu218/dsh-agent-md#readme",
+  "bugs": {
+    "url": "https://github.com/theGu218/dsh-agent-md/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node --check index.js",
+    "test": "node tools/smoke.mjs"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "memory",
+    "context",
+    "agent-md",
+    "agent-memory",
+    "记忆"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

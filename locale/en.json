@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Agent memory (agent.md)",
+    "description": "Keeps a project-level agent.md with the facts, constraints, and tasks that matter, injects it into every request, and lets the model re-weight or drop entries once work is done."
+  }
+}
