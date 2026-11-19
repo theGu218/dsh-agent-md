@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-md",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "项目级 agent.md 记忆插件：把对话里重要的事实、约束和任务写进工作目录下的 agent.md，每次请求自动注入；任务完成后降权或删除条目，让长任务不再失忆。",

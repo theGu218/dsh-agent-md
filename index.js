@@ -33,6 +33,8 @@ const DEFAULT_FILE = 'agent.md'
 const DEFAULT_MAX_CHARS = 4000
 const MAX_ENTRIES = 200
 const MAX_TEXT = 2000
+const MAX_ACCEPTANCE = 500
+const MAX_EVIDENCE = 500
 const MANAGED_MARK = '<!-- dsh-agent-md:managed v1 -->'
 const META_RE = /<!--\s*m:([A-Za-z0-9]{1,16})\s+w(\d+)\s*-->/
 const TASK_SECTION_RE = /任务|待办|task|todo/i
@@ -42,11 +44,20 @@ const RULES_TEXT = [
   '## 项目记忆 agent.md',
   '当前项目的对话与工作过程会被提炼进工作目录下的 `agent.md`，它在每次请求里自动注入（见紧随其后的一节）。',
   '维护它用四个工具：`agentmd_write`（新增）、`agentmd_update`（按 id 改内容/权重/完成状态）、`agentmd_forget`（删除）、`agentmd_read`（读全文，注入内容可能被截断）。',
-  '- 用户给出重要事实、约束、偏好、决策、验收标准或任务要求时：**立刻** `agentmd_write` 记下（kind=fact 或 task；影响判断的用 weight 3，次要的用 2 或 1）。',
-  '- 任务完成或要求已满足：`agentmd_update` 把该条 done=true 并把 weight 降到 1，不要直接删掉仍在起作用的结论。',
-  '- 已过时、被推翻、与当前工作无关的条目：`agentmd_forget` 删掉，或降到 weight 1。',
+  '',
+  '**写之前先做三问**（三问都"是"才记）：',
+  '1. 10 轮之后它还会影响某个决定吗？不会 → 不记。',
+  '2. 如果忘了它，我可能做错什么？说不出来 → 不记。',
+  '3. 能从仓库或文件里随时查回来吗？能 → 不记。',
+  '该记：约束（技术栈/版本/平台/性能/合规/预算）、用户偏好与禁止事项、已定方案与接口契约、验收标准、环境事实（路径/命令/网络限制）。',
+  '不该记：试错过程与报错原文、可随时重查的代码细节、工具中间输出、寒暄与情绪、密钥与隐私。',
+  '权重：影响正确性且不可重查 = 3；影响风格或次要 = 2；备忘 = 1。',
+  '',
+  '**任务必须带验收标准**：`agentmd_write` 写 kind=task 时 `acceptance` 必填，写清"什么现象出现算完成"（例如"行数=30 且 npm test 通过"）。没有验收标准的任务等于没定义完成，工具会拒绝。',
+  '**标记完成必须有证据**：`agentmd_update` 的 done=true 必须给 `evidence`，可信度从高到低——测试/命令通过 > 产物可核对（文件、提交、行数）> 无证据的"我做了"（最后一种不能标 done，工具会拒绝）。',
+  '标记 done 会自动把权重降到 1（该结论后续仍被依赖时显式传 weight=2）；结论彻底过时再 `agentmd_forget` 删除。',
+  '注入里带 ⚠ 的条目是待处理的：`⚠ 未定验收` 要补 acceptance；`⚠ 已完成未降权` 要把 weight 降到 1。',
   '- 写之前先看注入的内容：同一件事用 `agentmd_update` 修改，不要重复新增；保持 agent.md 精简（几十条以内）。',
-  '- 不要记录密钥、口令、隐私和不影响后续判断的试错过程。',
   '- 执行任务、写代码、做决定前以注入的 agent.md 为准，不要凭记忆猜。',
 ].join('\n')
 
@@ -62,18 +73,38 @@ function parse(text) {
   const entries = []
   const freeText = []
   let kind = 'fact'
+  let current = null
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/\s+$/, '')
-    if (line.trim() === '') continue
+    if (line.trim() === '') {
+      current = null
+      continue
+    }
     if (line.indexOf(MANAGED_MARK) >= 0) continue
-    if (/^#\s/.test(line)) continue
+    if (/^#\s/.test(line)) {
+      current = null
+      continue
+    }
     const heading = /^##\s+(.*)$/.exec(line)
     if (heading) {
       kind = TASK_SECTION_RE.test(heading[1]) ? 'task' : 'fact'
+      current = null
+      continue
+    }
+    // 条目下的缩进字段：验收 / 证据
+    if (current !== null && /^\s+/.test(line)) {
+      const field = /^\s*(验收|证据)\s*[:：]\s*(.*)$/.exec(line)
+      if (field !== null) {
+        if (field[1] === '验收') current.acceptance = field[2].trim()
+        else current.evidence = field[2].trim()
+        continue
+      }
+      freeText.push(line)
       continue
     }
     const meta = line.match(META_RE)
     if (meta === null) {
+      current = null
       freeText.push(line)
       continue
     }
@@ -81,14 +112,20 @@ function parse(text) {
     const doneMatch = /^\[( |x|X)\]\s*/.exec(body)
     const done = doneMatch !== null && doneMatch[1].toLowerCase() === 'x'
     const content = (doneMatch === null ? body : body.slice(doneMatch[0].length)).trim()
-    if (content === '') continue
-    entries.push({
+    if (content === '') {
+      current = null
+      continue
+    }
+    current = {
       id: meta[1].toLowerCase(),
       kind,
       text: content,
       weight: clampWeight(meta[2]),
       done,
-    })
+      acceptance: '',
+      evidence: '',
+    }
+    entries.push(current)
   }
   return { entries, freeText }
 }
@@ -97,11 +134,17 @@ function serialize(state) {
   const facts = state.entries.filter((entry) => entry.kind === 'fact')
   const tasks = state.entries.filter((entry) => entry.kind === 'task')
   const out = ['# agent.md · 项目记忆', '', MANAGED_MARK, '', '## 事实与约束', '']
-  const line = (entry) =>
-    `- ${entry.kind === 'task' ? (entry.done ? '[x] ' : '[ ] ') : ''}${entry.text} <!--m:${entry.id} w${entry.weight}-->`
-  for (const entry of facts) out.push(line(entry))
+  const lines = (entry) => {
+    const result = [
+      `- ${entry.kind === 'task' ? (entry.done ? '[x] ' : '[ ] ') : ''}${entry.text} <!--m:${entry.id} w${entry.weight}-->`,
+    ]
+    if (entry.kind === 'task' && entry.acceptance) result.push(`  验收：${entry.acceptance}`)
+    if (entry.evidence) result.push(`  证据：${entry.evidence}`)
+    return result
+  }
+  for (const entry of facts) out.push(...lines(entry))
   out.push('', '## 任务', '')
-  for (const entry of tasks) out.push(line(entry))
+  for (const entry of tasks) out.push(...lines(entry))
   if (state.freeText.length > 0) {
     out.push('', '## 手写笔记', '')
     for (const raw of state.freeText) out.push(raw)
@@ -126,13 +169,18 @@ function renderInjection(state, file, maxChars) {
   if (pending.length > 0) {
     body.push('### 进行中任务')
     for (const entry of pending) {
-      body.push(`- [${entry.id}] ${entry.weight >= 2 ? entry.text : clip(entry.text, 80)}`)
+      const flag = entry.acceptance ? '' : '（⚠ 未定验收）'
+      body.push(`- [${entry.id}] ${entry.weight >= 2 ? entry.text : clip(entry.text, 80)}${flag}`)
+      if (entry.weight >= 2 && entry.acceptance) body.push(`  验收：${clip(entry.acceptance, 80)}`)
     }
     body.push('')
   }
   if (done.length > 0) {
-    body.push(`### 已完成 ${done.length} 条（已降权）`)
-    for (const entry of done.slice(0, 5)) body.push(`- [${entry.id}] ${clip(entry.text, 40)}`)
+    body.push(`### 已完成 ${done.length} 条`)
+    for (const entry of done.slice(0, 5)) {
+      const flag = entry.weight >= 2 ? '（⚠ 已完成未降权）' : ''
+      body.push(`- [${entry.id}] ${clip(entry.text, 40)}${flag}`)
+    }
     if (done.length > 5) body.push(`- …还有 ${done.length - 5} 条`)
     body.push('')
   }
@@ -162,8 +210,10 @@ function renderFull(state, file) {
     out.push(`## ${label}（${items.length} 条）`)
     for (const entry of items) {
       out.push(
-        `- [${entry.id}] w${entry.weight}${entry.done ? ' 已完成' : ''} ${entry.text}`,
+        `- [${entry.id}] w${entry.weight}${entry.done ? ' 已完成' : ''}${entry.kind === 'task' && entry.acceptance === '' ? ' ⚠未定验收' : ''} ${entry.text}`,
       )
+      if (entry.kind === 'task' && entry.acceptance) out.push(`    验收：${entry.acceptance}`)
+      if (entry.evidence) out.push(`    证据：${entry.evidence}`)
     }
     out.push('')
   }
@@ -299,13 +349,17 @@ export function apply(ctx, config) {
     {
       name: 'agentmd_write',
       description:
-        '把一条重要内容写进当前工作目录的 agent.md。kind=fact（事实/约束/偏好/决定）或 task（任务/要求）；weight=1~3 表示重要程度（3 最重要，默认 3）。agent.md 每次请求都会自动注入提示，所以写进去就相当于一直记着。写入前先看注入内容，同一件事用 agentmd_update 修改而不是重复新增。',
+        '把一条重要内容写进当前工作目录的 agent.md。kind=fact（事实/约束/偏好/决定）或 task（任务/要求）；weight=1~3 表示重要程度（3 最重要，默认 3）。写 task 时必须同时给 acceptance（验收标准：什么现象出现算完成），否则工具会拒绝——没有验收标准的任务无法判定完成。agent.md 每次请求都会自动注入提示，所以写进去就相当于一直记着。写入前先看注入内容，同一件事用 agentmd_update 修改而不是重复新增。',
       parameters: {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['fact', 'task'], description: 'fact=事实/约束，task=任务/要求' },
           text: { type: 'string', description: '要记住的内容，一两句话，能独立读懂' },
           weight: { type: 'integer', enum: [1, 2, 3], description: '重要程度，3 最重要（默认 3）' },
+          acceptance: {
+            type: 'string',
+            description: '验收标准（kind=task 时必填）：写清"什么现象出现算完成"，如"行数=30 且 npm test 通过"',
+          },
         },
         required: ['kind', 'text'],
         additionalProperties: false,
@@ -318,6 +372,16 @@ export function apply(ctx, config) {
         if (text.length > MAX_TEXT) {
           return { ok: false, message: `text 太长（${text.length} 字），请压缩到 ${MAX_TEXT} 字以内。` }
         }
+        const acceptance = typeof input.acceptance === 'string' ? input.acceptance.trim() : ''
+        if (kind === 'task' && acceptance === '') {
+          return {
+            ok: false,
+            message: '写任务必须提供 acceptance（验收标准）：写清"什么现象出现算完成"，否则这条任务无法判定是否完成。',
+          }
+        }
+        if (acceptance.length > MAX_ACCEPTANCE) {
+          return { ok: false, message: `acceptance 太长（${acceptance.length} 字），请压缩到 ${MAX_ACCEPTANCE} 字以内。` }
+        }
         const { cwd, file } = toolContext(exec)
         if (cwd === '') return { ok: false, message: '拿不到当前会话的工作目录，无法定位 agent.md。' }
         const state = readState(file)
@@ -329,25 +393,35 @@ export function apply(ctx, config) {
         }
         const weight = clampWeight(input.weight)
         const id = newId(state.entries)
-        state.entries.push({ id, kind, text, weight, done: false })
+        state.entries.push({
+          id,
+          kind,
+          text,
+          weight,
+          done: false,
+          acceptance: kind === 'task' ? acceptance : '',
+          evidence: '',
+        })
         saveState(file, state)
         return {
           ok: true,
-          message: `已写入${kind === 'task' ? '任务' : '事实'} [${id}]（权重 ${weight}）→ ${file}`,
+          message: `已写入${kind === 'task' ? '任务（含验收标准）' : '事实'} [${id}]（权重 ${weight}）→ ${file}`,
         }
       },
     },
     {
       name: 'agentmd_update',
       description:
-        '按 id 修改 agent.md 里的条目：改写内容、调整权重、标记完成。任务做完或要求已满足时，用 done=true 且 weight=1 把它降权（保留结论但不占注意力）；需要时也可以调高权重。',
+        '按 id 修改 agent.md 里的条目：改写内容、补验收标准、调整权重、标记完成。标 done=true 必须同时给 evidence（可核对的证据：测试/命令结果、产物路径、行数等，"我做了"不算），并会自动把权重降到 1（结论仍被依赖时显式传 weight=2）。任务只是想做但还没有可核对结果时，不要标 done。',
       parameters: {
         type: 'object',
         properties: {
           id: { type: 'string', description: '条目 id（注入内容里方括号中的短串）' },
           text: { type: 'string', description: '新的内容（可选）' },
-          weight: { type: 'integer', enum: [1, 2, 3], description: '新权重（可选）' },
-          done: { type: 'boolean', description: '是否已完成（可选）' },
+          acceptance: { type: 'string', description: '验收标准（可选，给旧任务补上）' },
+          weight: { type: 'integer', enum: [1, 2, 3], description: '新权重（可选；done=true 且不传时自动降为 1）' },
+          done: { type: 'boolean', description: '是否已完成（可选；true 时必须给 evidence）' },
+          evidence: { type: 'string', description: '完成证据（done=true 时必填）：测试/命令输出、产物路径、行数等可核对的东西' },
         },
         required: ['id'],
         additionalProperties: false,
@@ -372,12 +446,35 @@ export function apply(ctx, config) {
           }
           entry.text = input.text.trim()
         }
+        if (typeof input.acceptance === 'string' && input.acceptance.trim() !== '') {
+          if (input.acceptance.trim().length > MAX_ACCEPTANCE) {
+            return { ok: false, message: `acceptance 太长，请压缩到 ${MAX_ACCEPTANCE} 字以内。` }
+          }
+          entry.acceptance = input.acceptance.trim()
+        }
+        const evidence = typeof input.evidence === 'string' ? input.evidence.trim() : ''
+        if (evidence.length > MAX_EVIDENCE) {
+          return { ok: false, message: `evidence 太长，请压缩到 ${MAX_EVIDENCE} 字以内。` }
+        }
+        if (evidence !== '') entry.evidence = evidence
         if (input.weight !== undefined) entry.weight = clampWeight(input.weight)
-        if (typeof input.done === 'boolean') entry.done = input.done
+        if (typeof input.done === 'boolean' && input.done) {
+          if (entry.evidence === '') {
+            return {
+              ok: false,
+              message: '标记完成必须提供 evidence：测试/命令结果、产物路径、行数等可核对的东西。"我做了"不算证据，没有证据时保持 pending。',
+            }
+          }
+          entry.done = true
+          // 完成即降权；结论仍被依赖时由调用方显式传 weight=2 覆盖。
+          if (input.weight === undefined) entry.weight = 1
+        } else if (typeof input.done === 'boolean') {
+          entry.done = input.done
+        }
         saveState(file, state)
         return {
           ok: true,
-          message: `已更新 [${id}]：权重 ${entry.weight}${entry.done ? '，已完成' : ''}`,
+          message: `已更新 [${id}]：权重 ${entry.weight}${entry.done ? '，已完成（附证据）' : ''}`,
         }
       },
     },
